@@ -18,6 +18,11 @@ grep -Fq 'default/udev/macbook-alpine-ridge-usb.rules' "$leaf" ||
   fail "new installs ship the udev rule"
 grep -Fq 'default/systemd/system-sleep/macbook-alpine-ridge-usb' "$leaf" ||
   fail "new installs ship the resume hook"
+guard_line=$(grep -n '/run/udev/control' "$leaf" | head -n 1 | cut -d: -f1)
+reload_line=$(grep -n 'udevadm control --reload-rules' "$leaf" | head -n 1 | cut -d: -f1)
+[[ -n $guard_line && -n $reload_line && $guard_line -lt $reload_line ]] &&
+  pass "install reload waits for a running udev" ||
+  fail "install reload waits for a running udev"
 grep -Fq 'default/udev/macbook-alpine-ridge-usb.rules' "$migration" ||
   fail "existing installs ship the same udev rule"
 grep -Fq 'default/systemd/system-sleep/macbook-alpine-ridge-usb' "$migration" ||
@@ -115,28 +120,35 @@ cat > "$stub/udevadm" <<'SH'
 printf 'udevadm' >>"$CALL_LOG"
 printf '\t%s' "$@" >>"$CALL_LOG"
 printf '\n' >>"$CALL_LOG"
+[[ ${UDEVADM_FAIL:-0} == 0 ]]
 SH
 chmod +x "$stub"/*
 
 rules="$tmp/etc/udev/rules.d/71-omarchy-macbook-alpine-ridge-usb.rules"
 hook="$tmp/system-sleep/macbook-alpine-ridge-usb"
+reload_marker="$tmp/reload-needed"
+udev_control="$tmp/udev-control"
 
 run_migration() {
   : > "$call_log"
-  PRODUCT="${PRODUCT:-MacBookPro14,1}" CALL_LOG="$call_log" PATH="$stub:$PATH" \
+  PRODUCT="${PRODUCT:-MacBookPro14,1}" CALL_LOG="$call_log" \
+    UDEVADM_FAIL="${UDEVADM_FAIL:-0}" PATH="$stub:$PATH" \
     OMARCHY_PATH="$ROOT" \
     OMARCHY_ALPINE_RIDGE_USB_RULES="$rules" \
     OMARCHY_ALPINE_RIDGE_USB_HOOK="$hook" \
+    OMARCHY_ALPINE_RIDGE_USB_RELOAD_MARKER="$reload_marker" \
+    OMARCHY_UDEV_CONTROL="$udev_control" \
     OMARCHY_PCI_DEVICES_PATH="$tmp/pci" \
     OMARCHY_USB_DEVICES_PATH="$tmp/usb" \
     OMARCHY_DMI_PRODUCT_PATH="$tmp/product" \
-    bash -euo pipefail "$migration" >/dev/null
+    bash -euo pipefail "$migration" >/dev/null 2>&1
 }
 
 printf '%s\n' MacBookPro14,1 > "$tmp/product"
+: > "$udev_control"
 write_tree auto auto
 PRODUCT=MacBookPro14,2 run_migration
-[[ ! -e $rules && ! -e $hook && ! -s $call_log ]] &&
+[[ ! -e $rules && ! -e $hook && ! -e $reload_marker && ! -s $call_log ]] &&
   pass "the migration leaves other machines alone" ||
   fail "the migration leaves other machines alone"
 
@@ -154,6 +166,9 @@ cmp -s "$hook_src" "$hook" &&
 grep -Fq $'udevadm\tcontrol\t--reload-rules' "$call_log" &&
   pass "a new rule is loaded without a reboot" ||
   fail "a new rule is loaded without a reboot" "$(cat "$call_log")"
+[[ ! -e $reload_marker ]] &&
+  pass "a successful reload clears its marker" ||
+  fail "a successful reload clears its marker"
 [[ $(control "$tmp/pci/0000:07:00.0/power/control") == "on" && $(control "$tmp/usb/usb4/power/control") == "on" ]] &&
   pass "the migration wakes a controller that is still suspended" ||
   fail "the migration wakes a controller that is still suspended"
@@ -175,3 +190,34 @@ grep -Fxq '# administrator copy' "$rules" &&
 grep -Fxq '# administrator hook' "$hook" &&
   pass "an existing resume hook is kept" ||
   fail "an existing resume hook is kept"
+
+rm -f "$rules" "$hook" "$reload_marker" "$udev_control"
+write_tree auto auto
+run_migration
+[[ ! -e $reload_marker ]] &&
+  pass "no running udev still finishes the reload" ||
+  fail "no running udev still finishes the reload"
+! grep -Fq udevadm "$call_log" &&
+  pass "no running udev skips the reload" ||
+  fail "no running udev skips the reload" "$(cat "$call_log")"
+
+rm -f "$rules" "$hook" "$reload_marker"
+: > "$udev_control"
+write_tree auto auto
+UDEVADM_FAIL=1
+if run_migration; then
+  fail "a failed reload stays pending"
+else
+  pass "a failed reload stays pending"
+fi
+[[ -e $reload_marker && -f $rules ]] &&
+  pass "a failed reload keeps the rule and the marker" ||
+  fail "a failed reload keeps the rule and the marker"
+UDEVADM_FAIL=0
+run_migration
+grep -Fq $'udevadm\tcontrol\t--reload-rules' "$call_log" &&
+  pass "the next run reloads the rule" ||
+  fail "the next run reloads the rule" "$(cat "$call_log")"
+[[ ! -e $reload_marker ]] &&
+  pass "the retried reload clears the marker" ||
+  fail "the retried reload clears the marker"

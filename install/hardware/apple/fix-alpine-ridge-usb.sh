@@ -12,6 +12,10 @@ if omarchy-hw-match "MacBookPro14,1"; then
     /etc/udev/rules.d/71-omarchy-macbook-alpine-ridge-usb.rules
   sudo install -Dm755 "$OMARCHY_PATH/default/systemd/system-sleep/macbook-alpine-ridge-usb" \
     /usr/lib/systemd/system-sleep/macbook-alpine-ridge-usb
-  sudo udevadm control --reload-rules
+  # The ISO runs hardware setup in a chroot with no udevd. Reloading then fails
+  # and stops the rest of the install. The next daemon reads the rule from disk.
+  if [[ -e /run/udev/control ]]; then
+    sudo udevadm control --reload-rules
+  fi
   sudo /usr/lib/systemd/system-sleep/macbook-alpine-ridge-usb post
 fi
